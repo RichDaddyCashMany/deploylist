@@ -7,7 +7,10 @@ import path from "path";
 const MAX_ITEMS = 200; // 存储上限，页面只取最近20
 
 // 本地持久化：未配置 Upstash 时使用文件存储，保证多请求间可见
-const DATA_DIR = path.join(process.cwd(), ".data");
+// Vercel 生产环境下工作目录只读（/var/task），必须写入 /tmp
+const IS_VERCEL = !!process.env.VERCEL;
+const BASE_DIR = IS_VERCEL ? "/tmp" : process.cwd();
+const DATA_DIR = path.join(BASE_DIR, ".data");
 const DATA_FILE = path.join(DATA_DIR, "deploy.json");
 
 interface PersistedState {
@@ -82,28 +85,53 @@ export async function addDeployRecord(payload: CreateDeployPayload): Promise<Dep
     await redis.ltrim(DEPLOY_KEY, 0, MAX_ITEMS - 1);
   }
 
-  // 文件持久化（无论是否配置 Redis，都写入，保证本地查询可用）
-  const state = await loadState();
-  state.records.unshift(record);
-  if (state.records.length > MAX_ITEMS) state.records.length = MAX_ITEMS;
-  if (!state.projects.includes(record.projectName)) state.projects.push(record.projectName);
-  await saveState(state);
+  // 文件持久化（无论是否配置 Redis，都写入，保证本地/无 Redis 时可查询）
+  // 在只读环境（未切到 /tmp 之前）写入可能失败，这里兜底不影响请求成功
+  try {
+    const state = await loadState();
+    state.records.unshift(record);
+    if (state.records.length > MAX_ITEMS) state.records.length = MAX_ITEMS;
+    if (!state.projects.includes(record.projectName)) state.projects.push(record.projectName);
+    await saveState(state);
+  } catch {
+    // ignore file write errors in serverless read-only environments
+  }
 
   return record;
 }
 
 export async function getLatestDeployRecords(limit: number, projectNames?: string[] | undefined): Promise<DeployRecord[]> {
-  // 从本地文件加载（作为统一数据源），保证本地开发可见
-  const state = await loadState();
   const min = Date.now() - THIRTY_DAYS_MS;
-  const list: DeployRecord[] = state.records.filter((r) => new Date(r.deployedAt).getTime() >= min);
 
+  // 优先读取 Redis（生产环境），回退到文件（本地开发或未配置 Redis）
+  if (redis) {
+    try {
+      const items = await redis.lrange(DEPLOY_KEY, 0, MAX_ITEMS - 1);
+      const parsed: DeployRecord[] = (items as unknown as string[])
+        .map((s) => {
+          try {
+            return JSON.parse(s) as DeployRecord;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean) as DeployRecord[];
+
+      let list = parsed.filter((r) => new Date(r.deployedAt).getTime() >= min);
+      const normalized = projectNames && projectNames.length > 0 ? new Set(projectNames) : undefined;
+      if (normalized) list = list.filter((x) => normalized.has(x.projectName));
+      list.sort((a, b) => (a.deployedAt < b.deployedAt ? 1 : -1));
+      return list.slice(0, limit);
+    } catch {
+      // 回退到文件
+    }
+  }
+
+  const state = await loadState();
+  const list: DeployRecord[] = state.records.filter((r) => new Date(r.deployedAt).getTime() >= min);
   const normalized = projectNames && projectNames.length > 0 ? new Set(projectNames) : undefined;
   const filtered = normalized ? list.filter((x) => normalized.has(x.projectName)) : list;
-
-  // 按时间倒序（lpush已经是倒序，但稳妥再排）
   filtered.sort((a, b) => (a.deployedAt < b.deployedAt ? 1 : -1));
-
   return filtered.slice(0, limit);
 }
 
@@ -135,8 +163,9 @@ export async function clearAllData(): Promise<{ cleared: number; mode: "redis|fi
   }
 
   const cleared = removedRedis + removedFile;
-  if (redis && removedRedis > 0) return { cleared, mode: "redis|file" };
-  if (redis) return { cleared, mode: "redis|file" };
-  return { cleared, mode: "file" };
+  const usedRedis = !!redis;
+  const usedFile = true;
+  const mode = usedRedis && usedFile ? ("redis|file" as const) : usedRedis ? ("redis" as const) : ("file" as const);
+  return { cleared, mode };
 }
 
