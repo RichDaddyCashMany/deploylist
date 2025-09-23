@@ -165,7 +165,13 @@ export async function getAllProjects(): Promise<string[]> {
   }
 
   const state = await loadState();
-  return [...state.projects].sort();
+  if (state.projects.length > 0) return [...state.projects].sort();
+  // 兜底：当 projects 为空但已有记录时，从记录中推断
+  if (state.records.length > 0) {
+    const inferred = Array.from(new Set(state.records.map((r) => r.projectName)));
+    return inferred.sort();
+  }
+  return [];
 }
 
 // 清空所有数据：
