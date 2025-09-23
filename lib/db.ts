@@ -12,6 +12,10 @@ const IS_VERCEL = !!process.env.VERCEL;
 const BASE_DIR = IS_VERCEL ? "/tmp" : process.cwd();
 const DATA_DIR = path.join(BASE_DIR, ".data");
 const DATA_FILE = path.join(DATA_DIR, "deploy.json");
+// 在 Vercel 只读环境下，作为只读兜底从代码仓库内读取初始数据
+const REPO_DATA_FILE = path.join(process.cwd(), ".data", "deploy.json");
+// 开关：仅使用 Redis，禁用文件存储与回退
+const REDIS_ONLY: boolean = String(process.env.REDIS_ONLY ?? "").toLowerCase() === "true" || process.env.REDIS_ONLY === "1";
 
 interface PersistedState {
   records: DeployRecord[];
@@ -27,9 +31,11 @@ async function ensureDataDir(): Promise<void> {
 }
 
 async function loadState(): Promise<PersistedState> {
-  try {
-    const buf = await fs.readFile(DATA_FILE, "utf8");
-    const parsed = JSON.parse(buf) as Partial<PersistedState>;
+  if (REDIS_ONLY) {
+    return { records: [], projects: [] };
+  }
+  const parseState = (jsonStr: string): PersistedState => {
+    const parsed = JSON.parse(jsonStr) as Partial<PersistedState>;
     const recordsRaw: DeployRecord[] = Array.isArray(parsed.records) ? (parsed.records as DeployRecord[]) : [];
     let changed = false;
     const records: DeployRecord[] = recordsRaw.map((r) => {
@@ -41,12 +47,31 @@ async function loadState(): Promise<PersistedState> {
       return r;
     });
     const projects: string[] = Array.isArray(parsed.projects) ? (parsed.projects as string[]) : [];
-    if (changed) {
-      await saveState({ records, projects });
-    }
     return { records, projects };
+  };
+
+  // 1) 优先读取运行时数据文件（Vercel=/tmp，开发=repo）
+  try {
+    const buf = await fs.readFile(DATA_FILE, "utf8");
+    const state = parseState(buf);
+    // 若是 Vercel 且运行时文件空，则兜底读取仓库内数据
+    if (IS_VERCEL && state.records.length === 0) {
+      try {
+        const fallback = await fs.readFile(REPO_DATA_FILE, "utf8");
+        return parseState(fallback);
+      } catch {
+        // ignore
+      }
+    }
+    return state;
   } catch {
-    return { records: [], projects: [] };
+    // 2) 兜底：读取仓库内的只读数据文件
+    try {
+      const fallback = await fs.readFile(REPO_DATA_FILE, "utf8");
+      return parseState(fallback);
+    } catch {
+      return { records: [], projects: [] };
+    }
   }
 }
 
@@ -89,14 +114,16 @@ export async function addDeployRecord(payload: CreateDeployPayload): Promise<Dep
 
   // 文件持久化（无论是否配置 Redis，都写入，保证本地/无 Redis 时可查询）
   // 在只读环境（未切到 /tmp 之前）写入可能失败，这里兜底不影响请求成功
-  try {
-    const state = await loadState();
-    state.records.unshift(record);
-    if (state.records.length > MAX_ITEMS) state.records.length = MAX_ITEMS;
-    if (!state.projects.includes(record.projectName)) state.projects.push(record.projectName);
-    await saveState(state);
-  } catch {
-    // ignore file write errors in serverless read-only environments
+  if (!REDIS_ONLY) {
+    try {
+      const state = await loadState();
+      state.records.unshift(record);
+      if (state.records.length > MAX_ITEMS) state.records.length = MAX_ITEMS;
+      if (!state.projects.includes(record.projectName)) state.projects.push(record.projectName);
+      await saveState(state);
+    } catch {
+      // ignore file write errors in serverless read-only environments
+    }
   }
 
   return record;
@@ -108,25 +135,50 @@ export async function getLatestDeployRecords(limit: number, projectNames?: strin
   // 优先读取 Redis（生产环境），回退到文件（本地开发或未配置 Redis）
   if (redis) {
     try {
-      const items = await redis.lrange(DEPLOY_KEY, 0, MAX_ITEMS - 1);
-      const parsed: DeployRecord[] = (items as unknown as string[])
-        .map((s) => {
-          try {
-            return JSON.parse(s) as DeployRecord;
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean) as DeployRecord[];
+      // 新优先：按 ZSET + 单条键读取，保证排序与扩展性
+      const ids = (await redis.zrange(DEPLOY_ZSET_KEY, 0, MAX_ITEMS - 1, { rev: true })) as unknown as string[];
+      let fromRedis: DeployRecord[] = [];
+      if (ids && ids.length > 0) {
+        const keys = ids.map((id) => `${DEPLOY_RECORD_PREFIX}${id}`);
+        const values = (await redis.mget(...(keys as [string, ...string[]]))) as unknown as (string | null)[];
+        fromRedis = values
+          .map((s) => {
+            try {
+              return s ? (JSON.parse(s) as DeployRecord) : null;
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean) as DeployRecord[];
+      }
 
-      let list = parsed.filter((r) => new Date(r.deployedAt).getTime() >= min);
+      // 兼容：ZSET 为空时回退到旧 List
+      if (fromRedis.length === 0) {
+        const items = await redis.lrange(DEPLOY_KEY, 0, MAX_ITEMS - 1);
+        fromRedis = (items as unknown as string[])
+          .map((s) => {
+            try {
+              return JSON.parse(s) as DeployRecord;
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean) as DeployRecord[];
+      }
+
+      let list = fromRedis.filter((r) => new Date(r.deployedAt).getTime() >= min);
       const normalized = projectNames && projectNames.length > 0 ? new Set(projectNames) : undefined;
       if (normalized) list = list.filter((x) => normalized.has(x.projectName));
       list.sort((a, b) => (a.deployedAt < b.deployedAt ? 1 : -1));
-      return list.slice(0, limit);
+      // 当 Redis 返回为空（例如新部署或空库）时，继续回退到文件
+      if (list.length > 0) return list.slice(0, limit);
     } catch {
       // 回退到文件
     }
+  }
+
+  if (REDIS_ONLY) {
+    return [];
   }
 
   const state = await loadState();
@@ -164,6 +216,10 @@ export async function getAllProjects(): Promise<string[]> {
     }
   }
 
+  if (REDIS_ONLY) {
+    return [];
+  }
+
   const state = await loadState();
   if (state.projects.length > 0) return [...state.projects].sort();
   // 兜底：当 projects 为空但已有记录时，从记录中推断
@@ -187,18 +243,21 @@ export async function clearAllData(): Promise<{ cleared: number; mode: "redis|fi
   }
 
   // 统计文件中条目数量后清空
-  const state = await loadState();
-  const removedFile = state.records.length + state.projects.length;
-  try {
-    await ensureDataDir();
-    await fs.writeFile(DATA_FILE, JSON.stringify({ records: [], projects: [] }, null, 2), "utf8");
-  } catch {
-    // ignore
+  let removedFile = 0;
+  if (!REDIS_ONLY) {
+    const state = await loadState();
+    removedFile = state.records.length + state.projects.length;
+    try {
+      await ensureDataDir();
+      await fs.writeFile(DATA_FILE, JSON.stringify({ records: [], projects: [] }, null, 2), "utf8");
+    } catch {
+      // ignore
+    }
   }
 
   const cleared = removedRedis + removedFile;
   const usedRedis = !!redis;
-  const usedFile = true;
+  const usedFile = !REDIS_ONLY;
   const mode = usedRedis && usedFile ? ("redis|file" as const) : usedRedis ? ("redis" as const) : ("file" as const);
   return { cleared, mode };
 }

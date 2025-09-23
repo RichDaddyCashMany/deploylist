@@ -6,6 +6,9 @@ function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
 }
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const limit = Math.max(1, Math.min(50, Number(searchParams.get("limit")) || 20));
@@ -14,7 +17,11 @@ export async function GET(req: NextRequest) {
   const csv = searchParams.get("projects");
   const projects = multi.length > 0 ? multi : csv ? csv.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
   const data = await getLatestDeployRecords(limit, projects);
-  return NextResponse.json({ data });
+  const res = NextResponse.json({ data });
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.headers.set("Pragma", "no-cache");
+  res.headers.set("Expires", "0");
+  return res;
 }
 
 export async function POST(req: NextRequest) {
@@ -38,7 +45,11 @@ export async function POST(req: NextRequest) {
     };
 
     const saved = await addDeployRecord(payload);
-    return NextResponse.json({ data: saved });
+    const res = NextResponse.json({ data: saved });
+    res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.headers.set("Pragma", "no-cache");
+    res.headers.set("Expires", "0");
+    return res;
   } catch (e) {
     return bad((e as Error).message || "invalid json");
   }
