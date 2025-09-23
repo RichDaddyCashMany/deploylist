@@ -1,6 +1,6 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Select, List, Typography, Tag, Space, Divider, Spin, Message } from "@arco-design/web-react";
+import { Select, List, Typography, Tag, Space, Divider, Spin, Message, Progress } from "@arco-design/web-react";
 import dayjs from "dayjs";
 import type { DeployRecord } from "@/lib/types";
 
@@ -11,6 +11,8 @@ const DEFAULT_FAVICON_PNG = "/images/favicon.png";
 const DEFAULT_FAVICON_ICO = "/images/favicon.ico";
 const NEW_MESSAGE_FAVICON_PNG = "/images/favicon-new-message.png";
 const NEW_MESSAGE_FAVICON_ICO = "/images/favicon-new-message.ico";
+const QUOTA_MS = 60_000 * 60 * 10; // 每次刷新后的轮询额度：10小时
+const COUNTDOWN_STEP_MS = 200; // 倒计时刷新频率
 
 type SegValue = string[]; // 多选的项目名数组，空数组表示全部
 
@@ -32,6 +34,11 @@ export default function YoupikPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [polling, setPolling] = useState<boolean>(false);
   const lastFirstIdRef = useRef<string | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+  const quotaTimerRef = useRef<number | null>(null);
+  const quotaStartTimeRef = useRef<number>(Date.now());
+  const [quotaMsLeft, setQuotaMsLeft] = useState<number>(QUOTA_MS);
+  const [quotaEnded, setQuotaEnded] = useState<boolean>(false);
 
   const selectOptions = useMemo(() => projects.map((p) => ({ label: p, value: p })), [projects]);
 
@@ -121,11 +128,55 @@ export default function YoupikPage() {
   }, []);
 
   useEffect(() => {
+    if (quotaEnded) {
+      return () => {};
+    }
     setLoading(true);
     poll();
-    const timer = setInterval(poll, POLL_MS);
-    return () => clearInterval(timer);
-  }, [poll]);
+    pollTimerRef.current = window.setInterval(() => {
+      poll();
+    }, POLL_MS);
+    return () => {
+      if (pollTimerRef.current !== null) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [poll, quotaEnded]);
+
+  // 页面刷新后开启一次额度倒计时（60秒）；额度用尽则停止轮询
+  useEffect(() => {
+    quotaStartTimeRef.current = Date.now();
+    setQuotaMsLeft(QUOTA_MS);
+    setQuotaEnded(false);
+    quotaTimerRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - quotaStartTimeRef.current;
+      const left = Math.max(0, QUOTA_MS - elapsed);
+      setQuotaMsLeft(left);
+      if (left <= 0) {
+        setQuotaEnded(true);
+      }
+    }, COUNTDOWN_STEP_MS);
+    return () => {
+      if (quotaTimerRef.current !== null) {
+        clearInterval(quotaTimerRef.current);
+        quotaTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // 当额度结束时，清理轮询与倒计时计时器
+  useEffect(() => {
+    if (!quotaEnded) return;
+    if (pollTimerRef.current !== null) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (quotaTimerRef.current !== null) {
+      clearInterval(quotaTimerRef.current);
+      quotaTimerRef.current = null;
+    }
+  }, [quotaEnded]);
 
   
   
@@ -148,7 +199,15 @@ export default function YoupikPage() {
         <div>
           <Typography.Title heading={3} style={{ marginBottom: 0 }}>
             流水线部署信息
-            {polling ? <Spin size={32} /> : null}
+            <span style={{ marginLeft: 12, verticalAlign: "middle", display: "inline-flex", alignItems: "center", gap: 8 }}>
+              {quotaEnded ? (
+                <div style={{color: "red", fontSize: 16}}>
+                  <span style={{ color: "blue", cursor: "pointer" }} onClick={() => {
+                    window.location.reload();
+                  }} >刷新网页</span>后重新开始轮询
+                </div>
+              ) : null}
+            </span>
           </Typography.Title>
         </div>
         <Select
