@@ -1,30 +1,72 @@
 import { redis, DEPLOY_KEY, PROJECT_SET_KEY, DEPLOY_ZSET_KEY, DEPLOY_RECORD_PREFIX } from "@/lib/redis";
 import { randomUUID } from "crypto";
 import type { CreateDeployPayload, DeployRecord } from "@/lib/types";
+import { promises as fs } from "fs";
+import path from "path";
 
 const MAX_ITEMS = 200; // 存储上限，页面只取最近20
 
-// 内存回退（仅用于未配置 Upstash 的本地开发）
-// 使用 globalThis 在 Next 开发环境热更新（HMR）时尽量保持不丢失；进程重启仍会丢失。
-declare global {
-  // eslint-disable-next-line no-var
-  var __flow_memList: DeployRecord[] | undefined;
-  // eslint-disable-next-line no-var
-  var __flow_memProjects: Set<string> | undefined;
+// 本地持久化：未配置 Upstash 时使用文件存储，保证多请求间可见
+const DATA_DIR = path.join(process.cwd(), ".data");
+const DATA_FILE = path.join(DATA_DIR, "deploy.json");
+
+interface PersistedState {
+  records: DeployRecord[];
+  projects: string[];
 }
 
-const memoryList: DeployRecord[] = (globalThis as any).__flow_memList ?? [];
-(globalThis as any).__flow_memList = memoryList;
+async function ensureDataDir(): Promise<void> {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  } catch {
+    // ignore
+  }
+}
 
-const memoryProjects: Set<string> = (globalThis as any).__flow_memProjects ?? new Set<string>();
-(globalThis as any).__flow_memProjects = memoryProjects;
+async function loadState(): Promise<PersistedState> {
+  try {
+    const buf = await fs.readFile(DATA_FILE, "utf8");
+    const parsed = JSON.parse(buf) as Partial<PersistedState>;
+    const recordsRaw: DeployRecord[] = Array.isArray(parsed.records) ? (parsed.records as DeployRecord[]) : [];
+    let changed = false;
+    const records: DeployRecord[] = recordsRaw.map((r) => {
+      const ts = r.deployedAt ? Date.parse(r.deployedAt) : NaN;
+      if (!r.deployedAt || Number.isNaN(ts)) {
+        changed = true;
+        return { ...r, deployedAt: new Date().toISOString() } as DeployRecord;
+      }
+      return r;
+    });
+    const projects: string[] = Array.isArray(parsed.projects) ? (parsed.projects as string[]) : [];
+    if (changed) {
+      await saveState({ records, projects });
+    }
+    return { records, projects };
+  } catch {
+    return { records: [], projects: [] };
+  }
+}
+
+async function saveState(state: PersistedState): Promise<void> {
+  await ensureDataDir();
+  const content = JSON.stringify(state, null, 2);
+  await fs.writeFile(DATA_FILE, content, "utf8");
+}
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+function resolveDeployedAt(input?: string): string {
+  const raw = (input ?? "").trim();
+  if (!raw) return new Date().toISOString();
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return new Date().toISOString();
+  return dt.toISOString();
+}
 
 export async function addDeployRecord(payload: CreateDeployPayload): Promise<DeployRecord> {
   const record: DeployRecord = {
     id: randomUUID(),
-    deployedAt: payload.deployedAt ?? new Date().toISOString(),
     ...payload,
+    deployedAt: resolveDeployedAt(payload.deployedAt),
   };
 
   // 新：按单条键 + ZSET 排序索引，并设置30天过期
@@ -38,48 +80,23 @@ export async function addDeployRecord(payload: CreateDeployPayload): Promise<Dep
     // 兼容：旧 List 保留写入以便之前页面还能读取（可选）
     await redis.lpush(DEPLOY_KEY, JSON.stringify(record));
     await redis.ltrim(DEPLOY_KEY, 0, MAX_ITEMS - 1);
-  } else {
-    memoryList.unshift(record);
-    if (memoryList.length > MAX_ITEMS) memoryList.length = MAX_ITEMS;
   }
 
-  // 记录项目集合
-  if (redis) {
-    await redis.sadd(PROJECT_SET_KEY, record.projectName);
-  } else {
-    memoryProjects.add(record.projectName);
-  }
+  // 文件持久化（无论是否配置 Redis，都写入，保证本地查询可用）
+  const state = await loadState();
+  state.records.unshift(record);
+  if (state.records.length > MAX_ITEMS) state.records.length = MAX_ITEMS;
+  if (!state.projects.includes(record.projectName)) state.projects.push(record.projectName);
+  await saveState(state);
 
   return record;
 }
 
 export async function getLatestDeployRecords(limit: number, projectNames?: string[] | undefined): Promise<DeployRecord[]> {
-  let list: DeployRecord[];
-  if (redis) {
-    const now = Date.now();
-    const minScore = now - THIRTY_DAYS_MS;
-    // 最近30天内的id，倒序
-    const ids = await redis.zrange(DEPLOY_ZSET_KEY, minScore, now, { byScore: true });
-    ids.reverse();
-    // 只取前 limit*5 个 id，再批量 mget
-    const stringIds = (ids as unknown as string[]).slice(0, Math.min(ids.length, limit * 5));
-    const keys = stringIds.map((id) => `${DEPLOY_RECORD_PREFIX}${id}`);
-    const values = keys.length > 0 ? await redis.mget(...keys) : [] as (string | null)[];
-    list = (values as (string | null)[])
-      .map((s) => {
-        if (!s) return null;
-        try {
-          return JSON.parse(s) as DeployRecord;
-        } catch {
-          return null;
-        }
-      })
-      .filter((x): x is DeployRecord => Boolean(x));
-  } else {
-    // 内存：同时过滤30天
-    const min = Date.now() - THIRTY_DAYS_MS;
-    list = memoryList.filter((r) => new Date(r.deployedAt).getTime() >= min);
-  }
+  // 从本地文件加载（作为统一数据源），保证本地开发可见
+  const state = await loadState();
+  const min = Date.now() - THIRTY_DAYS_MS;
+  const list: DeployRecord[] = state.records.filter((r) => new Date(r.deployedAt).getTime() >= min);
 
   const normalized = projectNames && projectNames.length > 0 ? new Set(projectNames) : undefined;
   const filtered = normalized ? list.filter((x) => normalized.has(x.projectName)) : list;
@@ -91,11 +108,35 @@ export async function getLatestDeployRecords(limit: number, projectNames?: strin
 }
 
 export async function getAllProjects(): Promise<string[]> {
-  if (redis) {
-    const arr = await redis.smembers<string[]>(PROJECT_SET_KEY);
-    return arr.sort();
-  }
-  return Array.from(memoryProjects).sort();
+  const state = await loadState();
+  return [...state.projects].sort();
 }
 
+// 清空所有数据：
+// - Redis：删除当前数据库下的所有键（keys("*") + del）
+// - 文件：删除 .data/deploy.json
+export async function clearAllData(): Promise<{ cleared: number; mode: "redis|file" | "file" | "redis" }> {
+  let removedRedis = 0;
+  if (redis) {
+    const keys = await redis.keys("*");
+    if (keys.length > 0) {
+      removedRedis = await redis.del(...(keys as [string, ...string[]]));
+    }
+  }
+
+  // 统计文件中条目数量后清空
+  const state = await loadState();
+  const removedFile = state.records.length + state.projects.length;
+  try {
+    await ensureDataDir();
+    await fs.writeFile(DATA_FILE, JSON.stringify({ records: [], projects: [] }, null, 2), "utf8");
+  } catch {
+    // ignore
+  }
+
+  const cleared = removedRedis + removedFile;
+  if (redis && removedRedis > 0) return { cleared, mode: "redis|file" };
+  if (redis) return { cleared, mode: "redis|file" };
+  return { cleared, mode: "file" };
+}
 

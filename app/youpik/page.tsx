@@ -57,7 +57,7 @@ export default function YoupikPage() {
             // 发现新记录：通知一次并更新缓存
             if ("Notification" in window) {
               if (Notification.permission === "granted") {
-                new Notification("新部署记录", { body: `${data[0].projectName}` });
+                new Notification("流水线部署完成", { body: `${data[0].projectName}` });
               } else if (Notification.permission !== "denied") {
                 await Notification.requestPermission();
               }
@@ -115,7 +115,6 @@ export default function YoupikPage() {
           style={{ width: "100%" }}
           options={selectOptions}
         />
-        <Divider style={{ margin: "12px 0" }} />
         {loading ? (
           <Spin style={{ width: "100%" }} />
         ) : (
@@ -124,7 +123,7 @@ export default function YoupikPage() {
             size="small"
             dataSource={list}
             render={(item) => {
-              const isFresh = dayjs().diff(dayjs(item.deployedAt), "minute") < 3;
+              const isFresh = dayjs().diff(dayjs(item.deployedAt), "minute") < 1;
               return (
                 <List.Item
                   key={item.id}
@@ -133,7 +132,6 @@ export default function YoupikPage() {
                     flexDirection: "column",
                     alignItems: "flex-start",
                     background: isFresh ? "rgba(82,196,26,0.08)" : "#fafafa",
-                    borderColor: isFresh ? "#52c41a" : undefined,
                   }}
                 >
                   <div style={{ width: "100%", display: "flex", flexDirection: "row", gap: 8, alignItems: "center" }}>
@@ -141,7 +139,7 @@ export default function YoupikPage() {
                     <Tag bordered>环境 {item.environment}</Tag>
                     <Tag bordered>分支 {item.branch}</Tag>
                     {statusTag(item.status)}
-                    <Typography.Text bold>部署时间：{dayjs(item.deployedAt).format("YYYY-MM-DD HH:mm:ss")}</Typography.Text>
+                    <Typography.Text bold>部署完成时间：{dayjs(item.deployedAt).format("YYYY-MM-DD HH:mm:ss")}</Typography.Text>
                   </div>
                   <div style={{ marginTop: 8, opacity: isFresh ? 1 : 0.7 }}>
                     <Typography.Text type="secondary">运行人：</Typography.Text>
