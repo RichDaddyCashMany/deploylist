@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { addDeployRecord, getLatestDeployRecords } from "@/lib/db";
 import type { CreateDeployPayload } from "@/lib/types";
+import { redis, DEPLOY_KEY, DEPLOY_ZSET_KEY, DEPLOY_RECORD_PREFIX, PROJECT_SET_KEY } from "@/lib/redis";
 
 function bad(msg: string, code = 400) {
   return NextResponse.json({ error: msg }, { status: code });
@@ -11,6 +12,23 @@ export const revalidate = 0;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
+  if (searchParams.get("debug") === "1") {
+    const zcard = redis ? ((await redis.zcard(DEPLOY_ZSET_KEY)) as unknown as number) : 0;
+    const ids = redis ? ((await redis.zrange(DEPLOY_ZSET_KEY, 0, 10, { rev: true })) as unknown as string[]) : [];
+    const firstId = ids[0];
+    const firstRecord = firstId && redis ? (await redis.get(`${DEPLOY_RECORD_PREFIX}${firstId}`)) : null;
+    const lcount = redis ? ((await redis.llen(DEPLOY_KEY)) as unknown as number) : 0;
+    const lsample = redis ? ((await redis.lrange(DEPLOY_KEY, 0, 2)) as unknown as string[]) : [];
+    const pcount = redis ? ((await redis.scard(PROJECT_SET_KEY)) as unknown as number) : 0;
+    const limit = Math.max(1, Math.min(50, Number(searchParams.get("limit")) || 20));
+    const multi = searchParams.getAll("projectName");
+    const csv = searchParams.get("projects");
+    const projects = multi.length > 0 ? multi : csv ? csv.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+    const data = await getLatestDeployRecords(limit, projects);
+    const res = NextResponse.json({ data, debug: { zcard, ids, firstRecord: firstRecord ?? null, lcount, lsample, pcount } });
+    res.headers.set("Cache-Control", "no-store");
+    return res;
+  }
   const limit = Math.max(1, Math.min(50, Number(searchParams.get("limit")) || 20));
   // 支持 ?projectName=a&projectName=b 或 ?projects=a,b
   const multi = searchParams.getAll("projectName");
