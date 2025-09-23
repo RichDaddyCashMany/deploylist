@@ -5,6 +5,13 @@ import React from "react";
 export const metadata: Metadata = {
   title: "流水线部署信息",
   description: "展示最近的部署记录",
+  icons: {
+    icon: [
+      { url: "/images/favicon.png", type: "image/png" },
+      { url: "/images/favicon.ico", type: "image/x-icon" },
+    ],
+    shortcut: [{ url: "/images/favicon.ico", type: "image/x-icon" }],
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

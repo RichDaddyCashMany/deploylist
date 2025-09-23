@@ -7,6 +7,10 @@ import type { DeployRecord } from "@/lib/types";
 const POLL_MS = 5000;
 const MAX_SHOW = 20;
 const LS_LAST_NOTIFIED_KEY = "deploylist:lastNotifiedId";
+const DEFAULT_FAVICON_PNG = "/images/favicon.png";
+const DEFAULT_FAVICON_ICO = "/images/favicon.ico";
+const NEW_MESSAGE_FAVICON_PNG = "/images/favicon-new-message.png";
+const NEW_MESSAGE_FAVICON_ICO = "/images/favicon-new-message.ico";
 
 type SegValue = string[]; // 多选的项目名数组，空数组表示全部
 
@@ -69,6 +73,8 @@ export default function YoupikPage() {
               fetch(`${barkBase}${text}`, { method: "GET" }).catch(() => {});
             }
             window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, newestId);
+            // 切换 favicon 提示有新消息（仅修改现有三条 link 的 href）
+            setFaviconsToNewMessage();
           }
         }
         lastFirstIdRef.current = newestId;
@@ -83,6 +89,30 @@ export default function YoupikPage() {
     }
   }, [query]);
 
+  // 仅修改现有三条 link 的 href
+  function findFaviconLinks() {
+    const shortcut = document.querySelector('link[rel="shortcut icon"]') as HTMLLinkElement | null;
+    const png = document.querySelector('link[rel="icon"][type="image/png"]') as HTMLLinkElement | null;
+    const ico = document.querySelector('link[rel="icon"][type="image/x-icon"]') as HTMLLinkElement | null;
+    return { shortcut, png, ico };
+  }
+
+  function setFaviconsToNewMessage() {
+    if (typeof document === "undefined") return;
+    const { shortcut, png, ico } = findFaviconLinks();
+    if (shortcut) shortcut.href = NEW_MESSAGE_FAVICON_ICO;
+    if (png) png.href = NEW_MESSAGE_FAVICON_PNG;
+    if (ico) ico.href = NEW_MESSAGE_FAVICON_ICO;
+  }
+
+  function setFaviconsToDefault() {
+    if (typeof document === "undefined") return;
+    const { shortcut, png, ico } = findFaviconLinks();
+    if (shortcut) shortcut.href = DEFAULT_FAVICON_ICO;
+    if (png) png.href = DEFAULT_FAVICON_PNG;
+    if (ico) ico.href = DEFAULT_FAVICON_ICO;
+  }
+
   useEffect(() => {
     // 初次加载项目列表
     fetchJSON<{ data: string[] }>("/api/projects")
@@ -96,6 +126,21 @@ export default function YoupikPage() {
     const timer = setInterval(poll, POLL_MS);
     return () => clearInterval(timer);
   }, [poll]);
+
+  
+  
+
+  // 当页面（标签）重新可见或获得焦点时，恢复默认 favicon（仅改 href）
+  useEffect(() => {
+    const handleMouseEnter = () => {
+      setFaviconsToDefault();
+    }
+    document.addEventListener('mouseenter', handleMouseEnter);
+    return () => {
+      document.removeEventListener('mouseenter', handleMouseEnter);
+    }
+  }, []);
+
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
