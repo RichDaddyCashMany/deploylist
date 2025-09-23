@@ -136,7 +136,7 @@ export default function YoupikPage() {
                 >
                   <div style={{ width: "100%", display: "flex", flexDirection: "row", gap: 8, alignItems: "center" }}>
                     <Tag bordered>项目 {item.projectName}</Tag>
-                    <Tag bordered>环境 {item.environment}</Tag>
+                    {/* <Tag bordered>环境 {item.environment}</Tag> */}
                     <Tag bordered>分支 {item.branch}</Tag>
                     {statusTag(item.status)}
                     <Typography.Text bold>部署完成时间：{dayjs(item.deployedAt).format("YYYY-MM-DD HH:mm:ss")}</Typography.Text>

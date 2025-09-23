@@ -83,6 +83,8 @@ export async function addDeployRecord(payload: CreateDeployPayload): Promise<Dep
     // 兼容：旧 List 保留写入以便之前页面还能读取（可选）
     await redis.lpush(DEPLOY_KEY, JSON.stringify(record));
     await redis.ltrim(DEPLOY_KEY, 0, MAX_ITEMS - 1);
+    // 同步项目集合，供 /api/projects 读取
+    await redis.sadd(PROJECT_SET_KEY, record.projectName);
   }
 
   // 文件持久化（无论是否配置 Redis，都写入，保证本地/无 Redis 时可查询）
@@ -136,6 +138,32 @@ export async function getLatestDeployRecords(limit: number, projectNames?: strin
 }
 
 export async function getAllProjects(): Promise<string[]> {
+  // 优先从 Redis 读取项目集合
+  if (redis) {
+    try {
+      const members = (await redis.smembers(PROJECT_SET_KEY)) as unknown as string[];
+      const set: string[] = Array.isArray(members) ? members : [];
+      if (set.length > 0) {
+        return [...new Set(set)].sort();
+      }
+      // 兜底：从旧 List 中推断
+      const items = await redis.lrange(DEPLOY_KEY, 0, MAX_ITEMS - 1);
+      const parsed: DeployRecord[] = (items as unknown as string[])
+        .map((s) => {
+          try {
+            return JSON.parse(s) as DeployRecord;
+          } catch {
+            return null as unknown as DeployRecord;
+          }
+        })
+        .filter(Boolean) as DeployRecord[];
+      const inferred = Array.from(new Set(parsed.map((r) => r.projectName)));
+      if (inferred.length > 0) return inferred.sort();
+    } catch {
+      // 回退到文件
+    }
+  }
+
   const state = await loadState();
   return [...state.projects].sort();
 }

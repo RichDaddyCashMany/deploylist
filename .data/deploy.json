@@ -1,4 +1,19 @@
 {
-  "records": [],
-  "projects": []
+  "records": [
+    {
+      "id": "5ef6f53c-408d-4489-a10f-e9fabdb5f9f4",
+      "title": "Youpik Grow OPS测试服",
+      "projectName": "Youpik Grow OPS测试服",
+      "operator": "黄金超-页面手动触发",
+      "environment": "test",
+      "branch": "test",
+      "commit": "andy7076: 修改Drawer布局",
+      "note": "✅",
+      "deployedAt": "2025-09-23T05:01:11.000Z",
+      "status": "部署成功"
+    }
+  ],
+  "projects": [
+    "Youpik Grow OPS测试服"
+  ]
 }
