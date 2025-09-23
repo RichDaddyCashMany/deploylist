@@ -1,7 +1,10 @@
 import { Redis } from "@upstash/redis";
 
-const url = process.env.UPSTASH_REDIS_REST_URL;
-const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+const UPSTASH_REDIS_REST_URL="https://devoted-racer-9395.upstash.io"
+const UPSTASH_REDIS_REST_TOKEN="ASSzAAImcDI1OWE3YzBkNDlmMzE0ZjkyODA5NWExMTE1MmM2ZGJiOHAyOTM5NQ"
+
+const url = UPSTASH_REDIS_REST_URL;
+const token = UPSTASH_REDIS_REST_TOKEN;
 
 export const redis: Redis | null = url && token ? new Redis({ url, token }) : null;
 
