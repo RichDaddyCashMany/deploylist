@@ -6,6 +6,7 @@ import type { DeployRecord } from "@/lib/types";
 
 const POLL_MS = 5000;
 const MAX_SHOW = 20;
+const LS_LAST_NOTIFIED_KEY = "deploylist:lastNotifiedId";
 
 type SegValue = string[]; // 多选的项目名数组，空数组表示全部
 
@@ -47,19 +48,27 @@ export default function YoupikPage() {
       setList(data);
       if (data.length > 0) {
         const newestId = data[0].id;
-        if (lastFirstIdRef.current && newestId !== lastFirstIdRef.current) {
-          if (typeof window !== "undefined" && "Notification" in window) {
-            if (Notification.permission === "granted") {
-              new Notification("新部署记录", { body: `${data[0].projectName} - ${data[0].title}` });
-            } else if (Notification.permission !== "denied") {
-              await Notification.requestPermission();
+        if (typeof window !== "undefined") {
+          const cachedId = window.localStorage.getItem(LS_LAST_NOTIFIED_KEY);
+          if (cachedId === null) {
+            // 首次加载：只记录，不通知
+            window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, newestId);
+          } else if (cachedId !== newestId) {
+            // 发现新记录：通知一次并更新缓存
+            if ("Notification" in window) {
+              if (Notification.permission === "granted") {
+                new Notification("新部署记录", { body: `${data[0].projectName}` });
+              } else if (Notification.permission !== "denied") {
+                await Notification.requestPermission();
+              }
             }
-          }
-          // Bark 推送
-          const barkBase = process.env.NEXT_PUBLIC_BARK_BASE || "";
-          if (barkBase) {
-            const text = encodeURIComponent(`${data[0].projectName}-${data[0].title}`);
-            fetch(`${barkBase}${text}`, { method: "GET" }).catch(() => {});
+            // Bark 推送
+            const barkBase = process.env.NEXT_PUBLIC_BARK_BASE || "";
+            if (barkBase) {
+              const text = encodeURIComponent(`${data[0].projectName}`);
+              fetch(`${barkBase}${text}`, { method: "GET" }).catch(() => {});
+            }
+            window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, newestId);
           }
         }
         lastFirstIdRef.current = newestId;
