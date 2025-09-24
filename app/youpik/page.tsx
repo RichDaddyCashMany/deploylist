@@ -13,6 +13,7 @@ const NEW_MESSAGE_FAVICON_PNG = "/images/favicon-new-message.png";
 const NEW_MESSAGE_FAVICON_ICO = "/images/favicon-new-message.ico";
 const QUOTA_MS = 60_000 * 60 * 10; // 每次刷新后的轮询额度：10小时
 const COUNTDOWN_STEP_MS = 200; // 倒计时刷新频率
+const MAX_SEEN_CACHE = 500; // 本地已见消息缓存上限
 
 type SegValue = string[]; // 多选的项目名数组，空数组表示全部
 
@@ -39,6 +40,7 @@ export default function YoupikPage() {
   const quotaStartTimeRef = useRef<number>(Date.now());
   const [quotaMsLeft, setQuotaMsLeft] = useState<number>(QUOTA_MS);
   const [quotaEnded, setQuotaEnded] = useState<boolean>(false);
+  const suppressNotifyRef = useRef<boolean>(false);
 
   const selectOptions = useMemo(() => projects.map((p) => ({ label: p, value: p })), [projects]);
 
@@ -52,39 +54,63 @@ export default function YoupikPage() {
     return data.data;
   }, [seg]);
 
+  const refreshProjects = useCallback(async () => {
+    try {
+      const res = await fetchJSON<{ data: string[] }>("/api/projects");
+      setProjects(res.data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleSegChange = useCallback((value: string[]) => {
+    // 用户主动变更筛选，不应触发“新记录”通知
+    suppressNotifyRef.current = true;
+    setSeg(value);
+  }, []);
+
   const poll = useCallback(async () => {
     try {
       setPolling(true);
       const data = await query();
       setList(data);
       if (data.length > 0) {
-        const newestId = data[0].id;
-        if (typeof window !== "undefined") {
-          const cachedId = window.localStorage.getItem(LS_LAST_NOTIFIED_KEY);
-          if (cachedId === null) {
-            // 首次加载：只记录，不通知
-            window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, newestId);
-          } else if (cachedId !== newestId) {
-            // 发现新记录：通知一次并更新缓存
-            if ("Notification" in window) {
-              if (Notification.permission === "granted") {
-                new Notification("流水线部署完成", { body: `${data[0].projectName}` });
-              } else if (Notification.permission !== "denied") {
-                await Notification.requestPermission();
+        const ids = data.map((x) => x.id);
+        const seen = new Set(readSeenIds());
+        if (seen.size === 0) {
+          // 首次加载：只记录，不通知
+          writeSeenIds(ids);
+        } else {
+          const newIds = ids.filter((id) => !seen.has(id));
+          if (newIds.length > 0) {
+            if (suppressNotifyRef.current) {
+              // 由筛选变更导致列表变化：只更新缓存，不通知
+              writeSeenIds([...Array.from(seen), ...ids]);
+              suppressNotifyRef.current = false;
+            } else {
+              if ("Notification" in window) {
+                if (Notification.permission === "granted") {
+                  const firstNew = data.find((x) => newIds.includes(x.id)) || data[0];
+                  new Notification("流水线部署完成", { body: `${firstNew.projectName}` });
+                } else if (Notification.permission !== "denied") {
+                  await Notification.requestPermission();
+                }
               }
+              const barkBase = process.env.NEXT_PUBLIC_BARK_BASE || "";
+              if (barkBase) {
+                const firstNew = data.find((x) => newIds.includes(x.id)) || data[0];
+                const text = encodeURIComponent(`${firstNew.projectName}`);
+                fetch(`${barkBase}${text}`, { method: "GET" }).catch(() => {});
+              }
+              writeSeenIds([...Array.from(seen), ...ids]);
+              setFaviconsToNewMessage();
             }
-            // Bark 推送
-            const barkBase = process.env.NEXT_PUBLIC_BARK_BASE || "";
-            if (barkBase) {
-              const text = encodeURIComponent(`${data[0].projectName}`);
-              fetch(`${barkBase}${text}`, { method: "GET" }).catch(() => {});
-            }
-            window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, newestId);
-            // 切换 favicon 提示有新消息（仅修改现有三条 link 的 href）
-            setFaviconsToNewMessage();
+          } else {
+            // 没有新记录，同步缓存为并集（防止缓存丢失）
+            writeSeenIds([...Array.from(seen), ...ids]);
           }
         }
-        lastFirstIdRef.current = newestId;
+        lastFirstIdRef.current = ids[0] ?? null;
       }
     } catch (e) {
       Message.error((e as Error).message);
@@ -120,10 +146,31 @@ export default function YoupikPage() {
     if (ico) ico.href = DEFAULT_FAVICON_ICO;
   }
 
+  function readSeenIds(): string[] {
+    if (typeof window === "undefined") return [];
+    const raw = window.localStorage.getItem(LS_LAST_NOTIFIED_KEY);
+    if (raw == null) return [];
+    try {
+      if (raw.startsWith("[")) {
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+      }
+      return [raw]; // 兼容旧版本：此前仅存单个 id
+    } catch {
+      return [raw];
+    }
+  }
+
+  function writeSeenIds(ids: string[]) {
+    if (typeof window === "undefined") return;
+    const unique = Array.from(new Set(ids));
+    const trimmed = unique.slice(0, MAX_SEEN_CACHE);
+    window.localStorage.setItem(LS_LAST_NOTIFIED_KEY, JSON.stringify(trimmed));
+  }
+
   useEffect(() => {
     // 初次加载项目列表
-    fetchJSON<{ data: string[] }>("/api/projects")
-      .then((res) => setProjects(res.data))
+    refreshProjects()
       .catch(() => setProjects([]));
   }, []);
 
@@ -215,7 +262,12 @@ export default function YoupikPage() {
           allowClear
           placeholder="筛选项目"
           value={seg}
-          onChange={(v) => setSeg(v as string[])}
+          onChange={handleSegChange}
+          onVisibleChange={(visible: boolean) => {
+            if (visible) {
+              refreshProjects();
+            }
+          }}
           style={{ width: "100%" }}
           options={selectOptions}
         />
@@ -239,9 +291,9 @@ export default function YoupikPage() {
                   }}
                 >
                   <div style={{ width: "100%", display: "flex", flexDirection: "row", gap: 8, alignItems: "center" }}>
-                    <Tag bordered>{item.projectName}</Tag>
+                    <Tag color={item.projectName.includes('生产') || item.projectName.includes('prod') ? 'red' : 'blue'} bordered>{item.projectName}</Tag>
                     {/* <Tag bordered>环境 {item.environment}</Tag> */}
-                    <Tag bordered>分支 {item.branch}</Tag>
+                    <Tag bordered>{item.branch}分支</Tag>
                     {statusTag(item.status)}
                     <Typography.Text bold>{dayjs(item.deployedAt).format("YYYY-MM-DD HH:mm:ss")}</Typography.Text>
                   </div>
