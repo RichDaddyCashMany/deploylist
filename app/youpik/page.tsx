@@ -91,7 +91,7 @@ export default function YoupikPage() {
               if ("Notification" in window) {
                 if (Notification.permission === "granted") {
                   const firstNew = data.find((x) => newIds.includes(x.id)) || data[0];
-                  new Notification("流水线部署完成", { body: `${firstNew.projectName}` });
+                  new Notification(firstNew.projectName, { body: `${firstNew.commit}` });
                 } else if (Notification.permission !== "denied") {
                   await Notification.requestPermission();
                 }
