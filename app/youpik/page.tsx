@@ -5,7 +5,7 @@ import dayjs from "dayjs";
 import type { DeployRecord } from "@/lib/types";
 
 const POLL_MS = 5000;
-const MAX_SHOW = 20;
+const MAX_SHOW = 100;
 const LS_LAST_NOTIFIED_KEY = "deploylist:lastNotifiedId";
 const DEFAULT_FAVICON_PNG = "/images/favicon.png";
 const DEFAULT_FAVICON_ICO = "/images/favicon.ico";
