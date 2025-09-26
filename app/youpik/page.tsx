@@ -17,6 +17,17 @@ const QUOTA_MS = 60_000 * 60 * 8; // 每次刷新后的轮询额度：8小时
 const COUNTDOWN_STEP_MS = 200; // 倒计时刷新频率
 const MAX_SEEN_CACHE = 500; // 本地已见消息缓存上限
 
+function extractPgyerLinks(note: string): string[] {
+  const regex = /https:\/\/www\.pgyer\.com\/[A-Za-z0-9]+/g;
+  const matches = note.match(regex) || [];
+  return matches.map((m) => m.slice(0));
+}
+
+function buildQrImageUrl(link: string, size: number = 80): string {
+  const dim = `${size}x${size}`;
+  return `https://api.qrserver.com/v1/create-qr-code/?size=${dim}&data=${encodeURIComponent(link)}`;
+}
+
 type SegValue = string[]; // 多选的项目名数组，空数组表示全部
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -297,6 +308,7 @@ export default function YoupikPage() {
             dataSource={list}
             render={(item) => {
               const isFresh = dayjs().diff(dayjs(item.deployedAt), "minute") < 1;
+              const pgyerLinks = extractPgyerLinks(item.note || "");
               return (
                 <List.Item
                   key={item.id}
@@ -326,6 +338,15 @@ export default function YoupikPage() {
                     <div style={{ marginTop: 4, opacity: isFresh ? 1 : 0.7 }}>
                       <Typography.Text type="secondary">备注：</Typography.Text>
                       <Typography.Paragraph style={{ display: "inline", marginBottom: 0 }}>{item.note}</Typography.Paragraph>
+                      {pgyerLinks.length > 0 ? (
+                        <div style={{ marginTop: 8 }}>
+                          {pgyerLinks.map((link) => (
+                            <div key={link} style={{ marginTop: 4 }}>
+                              <img src={buildQrImageUrl(link, 240)} alt="二维码" width={120} height={120} />
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </List.Item>
