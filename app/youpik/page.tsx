@@ -11,7 +11,9 @@ const DEFAULT_FAVICON_PNG = "/images/favicon.png";
 const DEFAULT_FAVICON_ICO = "/images/favicon.ico";
 const NEW_MESSAGE_FAVICON_PNG = "/images/favicon-new-message.png";
 const NEW_MESSAGE_FAVICON_ICO = "/images/favicon-new-message.ico";
-const QUOTA_MS = 60_000 * 60 * 10; // 每次刷新后的轮询额度：10小时
+const OFFLINE_FAVICON_PNG = "/images/favicon-off-line.png";
+const OFFLINE_FAVICON_ICO = "/images/favicon-off-line.ico";
+const QUOTA_MS = 60_000 * 60 * 8; // 每次刷新后的轮询额度：8小时
 const COUNTDOWN_STEP_MS = 200; // 倒计时刷新频率
 const MAX_SEEN_CACHE = 500; // 本地已见消息缓存上限
 
@@ -146,6 +148,14 @@ export default function YoupikPage() {
     if (ico) ico.href = DEFAULT_FAVICON_ICO;
   }
 
+  function setFaviconsToOffline() {
+    if (typeof document === "undefined") return;
+    const { shortcut, png, ico } = findFaviconLinks();
+    if (shortcut) shortcut.href = OFFLINE_FAVICON_ICO;
+    if (png) png.href = OFFLINE_FAVICON_PNG;
+    if (ico) ico.href = OFFLINE_FAVICON_ICO;
+  }
+
   function readSeenIds(): string[] {
     if (typeof window === "undefined") return [];
     const raw = window.localStorage.getItem(LS_LAST_NOTIFIED_KEY);
@@ -222,6 +232,13 @@ export default function YoupikPage() {
     if (quotaTimerRef.current !== null) {
       clearInterval(quotaTimerRef.current);
       quotaTimerRef.current = null;
+    }
+  }, [quotaEnded]);
+
+  // 当额度结束时，设置离线 favicon
+  useEffect(() => {
+    if (quotaEnded) {
+      setFaviconsToOffline();
     }
   }, [quotaEnded]);
 
